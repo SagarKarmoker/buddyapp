@@ -118,10 +118,13 @@ jobs:
             npx prisma db push
             rm -rf dist
             npm run build || { ./node_modules/.bin/tsc --pretty false 2>&1; exit 1; }
+            test -f dist/index.js || { echo "Missing server/dist/index.js"; ls -la dist || true; exit 1; }
+            SERVER_DIR="$APP_PATH/server"
+            PM2_ENTRY="$SERVER_DIR/dist/index.js"
             if pm2 describe "$PM2_NAME" >/dev/null 2>&1; then
               pm2 reload "$PM2_NAME" --update-env
             else
-              pm2 start dist/index.js --name "$PM2_NAME"
+              pm2 start "$PM2_ENTRY" --name "$PM2_NAME" --cwd "$SERVER_DIR"
             fi
             pm2 save
             cd ../client
