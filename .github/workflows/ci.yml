@@ -1,8 +1,8 @@
 # CI validates server (Prisma + better-sqlite3) and client builds.
 #
 # Deploy (push to main only): SSH (password auth) into your VPS, pull the repo, build
-# server + client, then reload the API with PM2. Ensure sshd allows password login for the
-# deploy user if needed. Keep `server/.env` with a stable DATABASE_URL on persistent storage.
+# server + client, then reload the API with PM2. Non-interactive SSH uses a minimal PATH;
+# the remote script loads nvm/fnm and common bin dirs so npm/pm2 match an interactive shell.
 
 name: CI
 
@@ -88,7 +88,15 @@ jobs:
           script_stop: true
           command_timeout: 25m
           script: |
+            export PATH="/usr/local/bin:/usr/bin:/bin:/snap/bin:$HOME/.local/bin:$PATH"
+            export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+            [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+            command -v nvm >/dev/null 2>&1 && nvm use default >/dev/null 2>&1 || true
+            if command -v fnm >/dev/null 2>&1; then
+              eval "$(fnm env)"
+            fi
             set -euo pipefail
+            command -v npm >/dev/null || { echo "npm not on PATH after loading nvm/fnm. On the VPS run: which npm"; exit 127; }
             APP_PATH='${{ vars.VPS_APP_PATH }}'
             PM2_NAME='${{ vars.VPS_PM2_NAME }}'
             if [ -z "$APP_PATH" ]; then
