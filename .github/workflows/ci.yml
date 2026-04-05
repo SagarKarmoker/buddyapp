@@ -29,7 +29,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: server/package-lock.json
 
@@ -51,7 +51,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: client/package-lock.json
 
@@ -109,12 +109,15 @@ jobs:
             git checkout main
             git pull origin main
             cd server
-            # If NODE_ENV=production, npm ci skips devDependencies (no TypeScript → tsc fails).
-            NODE_ENV=development npm ci
+            # Force devDependencies (tsc, prisma CLI). Some VPS set NODE_ENV=production or
+            # npm production mode so strongly that NODE_ENV=development on one line is ignored.
+            export NPM_CONFIG_PRODUCTION=false
+            unset NODE_ENV
+            npm ci --include=dev
             npx prisma generate
             npx prisma db push
             rm -rf dist
-            npm run build
+            npm run build || { ./node_modules/.bin/tsc --pretty false 2>&1; exit 1; }
             if pm2 describe "$PM2_NAME" >/dev/null 2>&1; then
               pm2 reload "$PM2_NAME" --update-env
             else
@@ -122,5 +125,7 @@ jobs:
             fi
             pm2 save
             cd ../client
-            NODE_ENV=development npm ci
+            export NPM_CONFIG_PRODUCTION=false
+            unset NODE_ENV
+            npm ci --include=dev
             npm run build
