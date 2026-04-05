@@ -1,0 +1,79 @@
+# CI validates server (Prisma + better-sqlite3) and client builds before deploy.
+#
+# OnRender + SQLite:
+# - Attach a persistent disk to the web service and set DATABASE_URL to a path on that
+#   disk, e.g. file:/var/data/app.db (see https://render.com/docs/disks).
+# - Build command should run prisma generate (and db push or migrate) from `server/`.
+# - Add the service "Deploy Hook" URL as repo secret RENDER_DEPLOY_HOOK_URL to auto-deploy
+#   after a green main-branch push (optional; deploy job skips if unset).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    env:
+      # File URL relative to server/ — matches how Render should point at a disk-backed file
+      DATABASE_URL: file:./prisma/ci.db
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      # Native module compile for better-sqlite3 (Render/Linux same idea)
+      - name: Install build toolchain
+        run: sudo apt-get update && sudo apt-get install -y build-essential python3
+
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npx prisma db push
+      - run: npm run build
+
+  client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - run: npm ci
+      - run: npm run build
+
+  trigger-render:
+    needs: [server, client]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger OnRender deploy hook
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "${RENDER_DEPLOY_HOOK_URL:-}" ]; then
+            echo "RENDER_DEPLOY_HOOK_URL not configured — skipping OnRender trigger."
+            exit 0
+          fi
+          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL"
