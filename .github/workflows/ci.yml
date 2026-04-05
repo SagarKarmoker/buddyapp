@@ -1,11 +1,8 @@
-# CI validates server (Prisma + better-sqlite3) and client builds before deploy.
+# CI validates server (Prisma + better-sqlite3) and client builds.
 #
-# OnRender + SQLite:
-# - Attach a persistent disk to the web service and set DATABASE_URL to a path on that
-#   disk, e.g. file:/var/data/app.db (see https://render.com/docs/disks).
-# - Build command should run prisma generate (and db push or migrate) from `server/`.
-# - Add the service "Deploy Hook" URL as repo secret RENDER_DEPLOY_HOOK_URL to auto-deploy
-#   after a green main-branch push (optional; deploy job skips if unset).
+# Deploy (push to main only): SSH (password auth) into your VPS, pull the repo, build
+# server + client, then reload the API with PM2. Ensure sshd allows password login for the
+# deploy user if needed. Keep `server/.env` with a stable DATABASE_URL on persistent storage.
 
 name: CI
 
@@ -26,7 +23,6 @@ jobs:
       run:
         working-directory: server
     env:
-      # File URL relative to server/ — matches how Render should point at a disk-backed file
       DATABASE_URL: file:./prisma/ci.db
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +33,6 @@ jobs:
           cache: npm
           cache-dependency-path: server/package-lock.json
 
-      # Native module compile for better-sqlite3 (Render/Linux same idea)
       - name: Install build toolchain
         run: sudo apt-get update && sudo apt-get install -y build-essential python3
 
@@ -63,17 +58,59 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-  trigger-render:
+  deploy-vps:
     needs: [server, client]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger OnRender deploy hook
+      - name: Check VPS deploy secrets
+        id: vps
         env:
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PASSWORD: ${{ secrets.VPS_PASSWORD }}
         run: |
-          if [ -z "${RENDER_DEPLOY_HOOK_URL:-}" ]; then
-            echo "RENDER_DEPLOY_HOOK_URL not configured — skipping OnRender trigger."
-            exit 0
+          if [ -z "$VPS_HOST" ] || [ -z "$VPS_USER" ] || [ -z "$VPS_PASSWORD" ]; then
+            echo "VPS deploy skipped: add secrets VPS_HOST, VPS_USER, VPS_PASSWORD to enable."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-          curl -fsS -X POST "$RENDER_DEPLOY_HOOK_URL"
+
+      - name: Deploy on VPS (git pull, build, PM2)
+        if: steps.vps.outputs.skip != 'true'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          password: ${{ secrets.VPS_PASSWORD }}
+          port: ${{ vars.VPS_SSH_PORT || 22 }}
+          script_stop: true
+          command_timeout: 25m
+          script: |
+            set -euo pipefail
+            APP_PATH='${{ vars.VPS_APP_PATH }}'
+            PM2_NAME='${{ vars.VPS_PM2_NAME }}'
+            if [ -z "$APP_PATH" ]; then
+              echo "Set repository variable VPS_APP_PATH (clone path on the server, e.g. /var/www/appifylab)."
+              exit 1
+            fi
+            PM2_NAME="${PM2_NAME:-appifylab-api}"
+            cd "$APP_PATH"
+            git fetch origin main
+            git checkout main
+            git pull origin main
+            cd server
+            npm ci
+            npx prisma generate
+            npx prisma db push
+            npm run build
+            if pm2 describe "$PM2_NAME" >/dev/null 2>&1; then
+              pm2 reload "$PM2_NAME" --update-env
+            else
+              pm2 start dist/index.js --name "$PM2_NAME"
+            fi
+            pm2 save
+            cd ../client
+            npm ci
+            npm run build
