@@ -109,9 +109,11 @@ jobs:
             git checkout main
             git pull origin main
             cd server
-            npm ci
+            # If NODE_ENV=production, npm ci skips devDependencies (no TypeScript → tsc fails).
+            NODE_ENV=development npm ci
             npx prisma generate
             npx prisma db push
+            rm -rf dist
             npm run build
             if pm2 describe "$PM2_NAME" >/dev/null 2>&1; then
               pm2 reload "$PM2_NAME" --update-env
@@ -120,5 +122,5 @@ jobs:
             fi
             pm2 save
             cd ../client
-            npm ci
+            NODE_ENV=development npm ci
             npm run build
